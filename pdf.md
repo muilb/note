@@ -200,4 +200,32 @@ public static void main(String[] args) {
         e.printStackTrace();
     }
 }
+
+public void createMultipleSheets(List<ContentData> contentList) {
+    Creator creator = new Creator();
+    
+    String templatePath = "path/to/template.xlsx";
+    String outputPath = "path/to/output.xlsx";
+    
+    // Mở template
+    creator.openBook(outputPath, templatePath);
+    
+    // Copy sheet template cho mỗi content (trừ sheet đầu tiên đã có)
+    for (int i = 1; i < contentList.size(); i++) {
+        int currentSheetCount = creator.getSheetCount();
+        creator.copySheet(0, currentSheetCount, "Sheet_" + (i + 1));
+    }
+    
+    // Điền dữ liệu vào từng sheet
+    for (int i = 0; i < contentList.size(); i++) {
+        creator.setSheetNo(i);
+        
+        // Điền dữ liệu cho sheet này
+        ContentData content = contentList.get(i);
+        creator.getCell("!!TITLE").setValue(content.getTitle());
+        creator.getCell("!!DESCRIPTION").setValue(content.getDescription());
+    }
+    
+    creator.closeBook(true);
+}
 ```

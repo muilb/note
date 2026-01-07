@@ -124,3 +124,146 @@ public class ReportService extends AnnotationBaseExportService<InvoiceDTO> {
 2. **Trường hợp danh sách (Table):** Nếu bạn có một danh sách các mặt hàng (List Items) đổ vào dạng bảng, bạn nên kết hợp thêm một Annotation `@ExcelTable` hoặc xử lý thủ công một chút trong hàm `fillData` ghi đè (Override).
 
 Bạn có muốn tôi cải tiến thêm để bộ Base này xử lý được cả **danh sách (Table/List)** tự động tăng dòng không?
+
+Tuyệt vời! Là một **BrSE**, mình rất khuyến khích việc tự động hóa phần **Table (danh sách)** vì đây là phần dễ gây lỗi nhất (tràn trang, vỡ format) khi làm báo cáo.
+
+Để xử lý Table, chúng ta sẽ cần thêm một Annotation nữa để đánh dấu: **"Field này là một danh sách và cần được đổ vào bảng từ dòng nào"**.
+
+Dưới đây là giải pháp nâng cấp:
+
+### 1. Tạo thêm Annotation `@ExcelTable`
+
+Annotation này sẽ đặt trên một `List` trong DTO.
+
+```java
+import java.lang.annotation.ElementType;
+import java.lang.annotation.Retention;
+import java.lang.annotation.RetentionPolicy;
+import java.lang.annotation.Target;
+
+@Retention(RetentionPolicy.RUNTIME)
+@Target(ElementType.FIELD)
+public @interface ExcelTable {
+    int startRow(); // Dòng bắt đầu (0-based)
+    String[] columnMapping(); // Thứ tự các field của object con (ví dụ: "id", "name", "price")
+}
+
+```
+
+### 2. Cấu trúc DTO hoàn chỉnh
+
+```java
+public class ExportDTO {
+    // Phần header đơn lẻ
+    @ExcelCell(address = "B2")
+    private String reporterName;
+
+    // Phần danh sách (Table)
+    @ExcelTable(
+        startRow = 10, 
+        columnMapping = {"id", "productName", "quantity", "price"}
+    )
+    private List<ItemDTO> items;
+
+    // Getters, Setters...
+}
+
+public class ItemDTO {
+    private Integer id;
+    private String productName;
+    private Integer quantity;
+    private Double price;
+    // Getters, Setters...
+}
+
+```
+
+### 3. Nâng cấp Base Service (Xử lý Reflection cho Table)
+
+Mình sẽ cập nhật hàm `fillData` để nhận diện cả `@ExcelCell` và `@ExcelTable`.
+
+```java
+import jp.co.adv.excelcreator.Creator;
+import java.lang.reflect.Field;
+import java.util.Collection;
+import java.util.List;
+
+public abstract class AnnotationBaseExportService<T> extends BaseExcelCreatorService<T> {
+
+    @Override
+    protected void fillData(Creator creator, T item, int index) {
+        Field[] fields = item.getClass().getDeclaredFields();
+
+        for (Field field : fields) {
+            field.setAccessible(true);
+            try {
+                // 1. Xử lý Cell đơn lẻ
+                if (field.isAnnotationPresent(ExcelCell.class)) {
+                    ExcelCell cellAnnos = field.getAnnotation(ExcelCell.class);
+                    fillSingleCell(creator, cellAnnos, field.get(item));
+                }
+                
+                // 2. Xử lý Table (Danh sách)
+                else if (field.isAnnotationPresent(ExcelTable.class)) {
+                    ExcelTable tableAnnos = field.getAnnotation(ExcelTable.class);
+                    Object listData = field.get(item);
+                    if (listData instanceof List) {
+                        fillTableData(creator, tableAnnos, (List<?>) listData);
+                    }
+                }
+            } catch (Exception e) {
+                e.printStackTrace();
+            }
+        }
+    }
+
+    private void fillTableData(Creator creator, ExcelTable config, List<?> dataList) throws Exception {
+        int currentRow = config.startRow();
+        String[] mappings = config.columnMapping();
+
+        for (Object rowData : dataList) {
+            // Duyệt từng cột theo mapping đã định nghĩa
+            for (int col = 0; col < mappings.length; col++) {
+                Field rowField = rowData.getClass().getDeclaredField(mappings[col]);
+                rowField.setAccessible(true);
+                Object value = rowField.get(rowData);
+
+                // Ghi dữ liệu vào ô (col, currentRow)
+                creator.setPos(col, currentRow);
+                creator.getCell().setValue(value);
+            }
+            currentRow++; // Xuống dòng tiếp theo
+            
+            // Nếu dùng ExcelCreator, bạn có thể cần chèn thêm dòng nếu danh sách dài
+            // creator.rowInsert(currentRow); 
+        }
+    }
+
+    private void fillSingleCell(Creator creator, ExcelCell annos, Object value) {
+        if (value == null) return;
+        if (!annos.address().isEmpty()) {
+            creator.getCell(annos.address()).setValue(value);
+        } else if (annos.row() != -1 && annos.col() != -1) {
+            creator.setPos(annos.col(), annos.row());
+            creator.getCell().setValue(value);
+        }
+    }
+}
+
+```
+
+---
+
+### 4. Phân tích Kỹ thuật (BrSE Insight)
+
+* **Tính linh hoạt:** `columnMapping = {"id", "productName"}` cực kỳ quan trọng. Nó cho phép bạn chọn thứ tự cột xuất hiện trong Excel mà không phụ thuộc vào thứ tự khai báo field trong Java.
+* **Vấn đề Page Break (Ngắt trang):** Nếu Table quá dài (vượt quá 1 trang PDF), bạn cần tính toán logic:
+* Sử dụng hàm `creator.rowInsert()` để đẩy các dòng dưới xuống, tránh ghi đè vào Footer.
+* Hoặc nếu template có khung cố định (ví dụ chỉ chứa được 20 dòng), bạn phải chia nhỏ `List<ItemDTO>` ra nhiều trang (mỗi trang 20 items).
+
+
+* **Hiệu năng:** Việc dùng `getDeclaredField` trong vòng lặp Table có thể tối ưu bằng cách **Cache** các Field object vào một `Map` để không phải tìm lại ở mỗi dòng.
+
+### Bước tiếp theo:
+
+Bạn có muốn tôi xử lý phần **Format** (định dạng số tiền, ngày tháng, hoặc kẻ khung tự động cho Table) luôn không? Phần này sẽ giúp báo cáo trông chuyên nghiệp (Professional) hơn rất nhiều.

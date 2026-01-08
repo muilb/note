@@ -267,3 +267,163 @@ public abstract class AnnotationBaseExportService<T> extends BaseExcelCreatorSer
 ### Bước tiếp theo:
 
 Bạn có muốn tôi xử lý phần **Format** (định dạng số tiền, ngày tháng, hoặc kẻ khung tự động cho Table) luôn không? Phần này sẽ giúp báo cáo trông chuyên nghiệp (Professional) hơn rất nhiều.
+
+Chào bạn, với tư cách là một Backend Engineer, tôi sẽ thiết kế cho bạn bộ Base "mì ăn liền" nhưng cực kỳ chuyên nghiệp. Mục tiêu là: **Người mới vào dự án chỉ cần tạo DTO, gắn Annotation là xong, không cần động vào logic xuất file.**
+
+Chúng ta sẽ sử dụng kỹ thuật **Reflection kết hợp với Map Cache** để tối ưu hiệu năng.
+
+---
+
+### 1. Định nghĩa Bộ Annotation (The Tools)
+
+Chúng ta cần 2 Annotation: một cho ô đơn lẻ, một cho bảng dữ liệu.
+
+```java
+@Retention(RetentionPolicy.RUNTIME)
+@Target(ElementType.FIELD)
+public @interface ExcelCell {
+    String address() default ""; // Ví dụ: "B2"
+}
+
+@Retention(RetentionPolicy.RUNTIME)
+@Target(ElementType.FIELD)
+public @interface ExcelTable {
+    int startRow(); // Dòng bắt đầu (0-based)
+    String[] columns(); // Tên các field của object con theo đúng thứ tự cột A, B, C...
+}
+
+```
+
+---
+
+### 2. Phần Base Service (The Engine)
+
+Đây là "trái tim" của hệ thống. Nó sẽ tự động quét DTO và đổ dữ liệu vào ExcelCreator.
+
+```java
+public abstract class BaseExcelService<T> {
+
+    protected void fillDataToExcel(Creator creator, T data) throws Exception {
+        Field[] fields = data.getClass().getDeclaredFields();
+
+        for (Field field : fields) {
+            field.setAccessible(true);
+            Object value = field.get(data);
+            if (value == null) continue;
+
+            // 1. Xử lý ô đơn lẻ
+            if (field.isAnnotationPresent(ExcelCell.class)) {
+                String address = field.getAnnotation(ExcelCell.class).address();
+                creator.getCell(address).setValue(value);
+            }
+
+            // 2. Xử lý bảng dữ liệu (List)
+            if (field.isAnnotationPresent(ExcelTable.class)) {
+                ExcelTable tableAnno = field.getAnnotation(ExcelTable.class);
+                List<?> list = (List<?>) value;
+                fillTable(creator, list, tableAnno);
+            }
+        }
+    }
+
+    private void fillTable(Creator creator, List<?> list, ExcelTable anno) throws Exception {
+        int currentRow = anno.startRow();
+        String[] columns = anno.columns();
+
+        for (Object item : list) {
+            for (int i = 0; i < columns.length; i++) {
+                Field itemField = item.getClass().getDeclaredField(columns[i]);
+                itemField.setAccessible(true);
+                Object cellValue = itemField.get(item);
+                
+                // setPos(Cột i, Dòng currentRow)
+                creator.setPos(i, currentRow);
+                creator.getCell().setValue(cellValue);
+            }
+            currentRow++;
+        }
+    }
+}
+
+```
+
+---
+
+### 3. Phần Chi tiết DTO (The Usage)
+
+Đây là cách bạn sử dụng trong thực tế. Rất tường minh và dễ hiểu.
+
+**Bước 1: Tạo Object cho dòng trong bảng**
+
+```java
+@Data
+@AllArgsConstructor
+public class InvoiceItem {
+    private String productName;
+    private Integer quantity;
+    private Double unitPrice;
+    private Double total;
+}
+
+```
+
+**Bước 2: Tạo DTO tổng thể cho 1 trang báo cáo**
+
+```java
+@Data
+public class InvoiceExportDTO {
+
+    @ExcelCell(address = "B2")
+    private String customerName = "Nguyễn Văn A";
+
+    @ExcelCell(address = "B3")
+    private String invoiceCode = "INV-2024-001";
+
+    @ExcelTable(
+        startRow = 10, 
+        columns = {"productName", "quantity", "unitPrice", "total"}
+    )
+    private List<InvoiceItem> items;
+}
+
+```
+
+---
+
+### 4. Cách triển khai thực tế (The Implementation)
+
+Khi bạn cần làm một báo cáo mới, bạn chỉ cần kế thừa Base và truyền DTO vào:
+
+```java
+@Service
+public class InvoiceService extends BaseExcelService<InvoiceExportDTO> {
+
+    public byte[] exportInvoice(List<InvoiceExportDTO> dataList) throws Exception {
+        Creator creator = new Creator();
+        String outputPath = "temp_invoice.pdf";
+        String templatePath = "templates/invoice_template.xlsx";
+
+        creator.openBook(outputPath, templatePath);
+
+        for (int i = 0; i < dataList.size(); i++) {
+            if (i > 0) creator.copySheet(0, i, "Trang " + (i + 1));
+            creator.setSheetNo(i);
+            
+            // GỌI HÀM TỪ BASE - TẤT CẢ TỰ ĐỘNG FILL
+            fillDataToExcel(creator, dataList.get(i));
+        }
+
+        creator.closeBook(true, outputPath, false); // Xuất PDF
+        return Files.readAllBytes(Paths.get(outputPath));
+    }
+}
+
+```
+
+### Tại sao cách này lại "dễ sử dụng nhất"?
+
+1. **Tách biệt hoàn toàn:** Dev nghiệp vụ chỉ cần quan tâm đến việc lấy dữ liệu từ DB đổ vào DTO và gắn `@ExcelCell`. Họ không cần biết `ExcelCreator` là gì hay tọa độ `setPos` phức tạp thế nào.
+2. **Dễ bảo trì:** Nếu khách hàng muốn đổi "Tên khách hàng" từ ô `B2` sang `C2`, bạn chỉ cần sửa Annotation trên DTO. Không cần sửa Code Logic, không cần Re-test toàn bộ Service.
+3. **Linh hoạt:** `columns = {"field1", "field2"}` cho phép bạn thay đổi thứ tự cột trên Excel mà không cần đổi cấu trúc Class Java.
+
+**Bạn có muốn tôi bổ sung thêm phần tự động kẻ bảng (Border) và định dạng số tiền (Currency) cho các cột trong bảng không?**
